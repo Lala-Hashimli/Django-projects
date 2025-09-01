@@ -1,19 +1,22 @@
+import json
+
+from django.db.models import F
+from django.conf import settings
 from django.utils import timezone
+from django.shortcuts import get_object_or_404
 from rest_framework import permissions
 from rest_framework.views import APIView, Response, status
-from .models import Product, Category, Favourite, Comment, ProductSubscription
-from .serializers import (ProductSerializer, CategorySerializer, 
-                          FavouritesSerializer, CommentSerializer)
+from ..models.product import Product
+from ..models.category import Category
+from ..models.subcategory import SubCategory
+from ..serializers.product_serializer import ProductSerializer
 
 
 class ProductsAPIView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        products = Product.objects.filter(
-            status=Product.APPROVED,
-            expires_at__gt=timezone.now()
-        )
+        products = Product.objects.all()
         category_id = request.query_params.get("category")
         city_id = request.query_params.get("city")
 
@@ -35,13 +38,12 @@ class ProductsAPIView(APIView):
                 {"message": "New product created"},
                 status=status.HTTP_201_CREATED
             )
-        return Response({"errors": serializer.errors}, status=400)
+        return Response({"errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class VIPProductsAPIView(APIView):
     def get(self, request):
         vip_products = Product.objects.filter(
-            status=Product.APPROVED,
             subscriptions__subscription_type__subscription_name="VIP",
             subscriptions__activated_at__lte=timezone.now(),
             subscriptions__expires_at__gt=timezone.now(),
@@ -54,7 +56,6 @@ class VIPProductsAPIView(APIView):
 class PremiumProductsAPIView(APIView):
     def get(self, request):
         premium_products = Product.objects.filter(
-            status=Product.APPROVED,
             subscriptions__subscription_type__subscription_name="Premium",
             subscriptions__activated_at__lte=timezone.now(),
             subscriptions__expires_at__gt=timezone.now(),
@@ -89,9 +90,11 @@ class FilteredProductsAPIView(APIView):
 
 class ProductDetailAPIView(APIView):
     def get(self, request, product_id):
-        product = Product.objects.get(id=product_id)
-        product.views_count += 1
+        product = get_object_or_404(Product, id=product_id)
+
+        product.views_count = F("views_count") + 1
         product.save(update_fields=["views_count"])
+        product.refresh_from_db()
 
         serializer = ProductSerializer(product)
 
@@ -109,7 +112,7 @@ class ProductDetailAPIView(APIView):
         })
 
     def put(self, request, product_id):
-        product = Product.objects.get(id=product_id)
+        product = get_object_or_404(Product, id=product_id)
 
         if product.user != request.user:
             return Response({"message": "Not allowed"}, 
@@ -125,61 +128,27 @@ class ProductDetailAPIView(APIView):
                         status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request, product_id):
-        product = Product.objects.get(id=product_id)
+        product = get_object_or_404(Product, id=product_id)
 
         if product.user != request.user:
             return Response({"message": "Not allowed"}, 
                             status=status.HTTP_400_BAD_REQUEST)
 
         product.delete()
-        return Response({"message": "Product deleted successfully"}, 
-                        status=status.HTTP_200_OK)
+        return Response({"message": "Product deleted successfully"}, status=status.HTTP_200_OK)
 
 
-class CategoriesAPIView(APIView):
-    def get(self, request):
-        categories = Category.objects.all()
-        serializer = CategorySerializer(categories, many=True)
-        return Response(serializer.data)
+class ProductParametersAPIView(APIView):
+    def get(self, request, category_id, subcategory_id):
+        with open(settings.BASE_DIR / "parameters.json", "r") as f:
+            parameters = json.load(f)
 
+        category = get_object_or_404(Category, id=category_id)
+        subcategory = get_object_or_404(SubCategory, id=subcategory_id)
 
-class AddToFavouritesAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+        try:
+            fields = parameters[category.name][subcategory.name]
+        except KeyError:
+            fields = []
 
-    def post(self, request):
-        data = request.data
-        user = request.user
-        product_id = request.data.get("product")
-        favourite = Favourite.objects.filter(user=user, product_id=product_id)
-
-        if favourite.exists():
-            favourite.delete()
-            return Response({"message": "Product removed from Favourites"})
-
-        serializer = FavouritesSerializer(data=data)
-        if serializer.is_valid():
-            serializer.save(user=user)
-            return Response({"message": "Product added to Favourites successfully"})
-        return Response({"errors": serializer.errors}, 
-                        status=status.HTTP_400_BAD_REQUEST)
-
-
-class CommentAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get(self, request, product_id):
-        comments = Comment.objects.filter(product_id=product_id)
-        serializer = CommentSerializer(comments, many=True)
-        return Response(serializer.data)
-
-    def post(self, request, product_id):
-        data = request.data
-        product = Product.objects.get(id=product_id)
-        serializer = CommentSerializer(data=data)
-
-        if serializer.is_valid():
-            serializer.save(user=request.user, product=product)
-            return Response(serializer.data, 
-                            status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, 
-                        status=status.HTTP_400_BAD_REQUEST)
+        return Response({"fields": fields})
